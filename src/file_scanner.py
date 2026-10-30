@@ -22,7 +22,7 @@ def file_scanner(dir_path: str) -> list[FileInfo]:
             file = FileInfo(
                 filename= filename,
                 extension= extension,
-                tokens= tokens
+                tokens= tuple(tokens)
             )
 
             files.append(file)

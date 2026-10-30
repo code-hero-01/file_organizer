@@ -40,7 +40,7 @@ class Classifier:
                 extension_score = extension_idf_idx[file.extension]
 
             scores[rule.folder_name] = keyword_wt * keyword_score + extension_wt * extension_score
-
+       
         return scores
 
     def classify(self, file : FileInfo) -> ClassificationResult:
@@ -66,11 +66,12 @@ class Classifier:
                     res.folder = first_highest[0] 
                     res.score = first_highest[1]
                     res.status = Status.ASSIGNED
-                    res.alternatives = [second_highest[0]]
+                    res.alternatives = (second_highest[0],)
+                   
                 elif confidence < 75 and confidence >= 40:
                     res.folder = None
                     res.status = Status.AMBIGUOUS
-                    res.alternatives = [first_highest[0], second_highest[0]]
+                    res.alternatives = (first_highest[0], second_highest[0])
                 else:
                     res.folder = None
                     res.status = Status.UNKNOWN

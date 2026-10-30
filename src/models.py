@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
-@dataclass
+@dataclass(frozen=True)
 class FileInfo:
     filename: str
     extension: str
-    tokens: list[str] = field(default_factory=list)  
+    tokens: tuple[str] = ()
 
 @dataclass
 class Rule:
@@ -13,15 +13,16 @@ class Rule:
     keywords: list[str] = field(default_factory=list)  
     extensions: list[str] = field(default_factory=list)  
 
+class Status(Enum):
+    UNKNOWN = auto()
+    AMBIGUOUS = auto()
+    ASSIGNED = auto()
+
 @dataclass
 class ClassificationResult:
     folder: str = None
     score: int = 0
     confidence: int = None
-    status: str = "unknown"
-    alternatives: list[str] = field(default_factory=list)  
+    status: Status = Status.UNKNOWN
+    alternatives: tuple[str] = ()
 
-class Status(Enum):
-            UNKNOWN = auto
-            AMBIGUOUS = auto
-            ASSIGNED = auto
