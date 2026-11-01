@@ -3,7 +3,6 @@ from file_scanner import file_scanner
 from ui import get_input
 from file_organizer import FileOrganizer
 
-
 def main():
     rules = get_input()
     classifier = Classifier(rules)

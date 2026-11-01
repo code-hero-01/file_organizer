@@ -48,41 +48,45 @@ class Classifier:
         res = ClassificationResult()
 
         scores = self.score(file)
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        alternatives = tuple(folder for folder, score in sorted_scores)
 
         confidence = 0
         if len(scores) > 1:
-            top_two_items = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:2]
+            top_two_items = sorted_scores[:2]
             first_highest = top_two_items[0]
             second_highest = top_two_items[1]
 
-            if first_highest[1] == 0:
-                    res.folder = None
-                    res.status = Status.UNKNOWN
+            if first_highest[1] < 1:
+                res.folder = None
+                res.status = Status.UNKNOWN
 
             else:
                 confidence = ((first_highest[1] - second_highest[1]) / first_highest[1]) * 100
-
+                
                 if confidence >= 75:
                     res.folder = first_highest[0] 
                     res.score = first_highest[1]
                     res.status = Status.ASSIGNED
-                    res.alternatives = (second_highest[0],)
+                    res.alternatives = alternatives
                    
                 elif confidence < 75 and confidence >= 40:
                     res.folder = None
                     res.status = Status.AMBIGUOUS
-                    res.alternatives = (first_highest[0], second_highest[0])
+                    res.alternatives = alternatives
                 else:
                     res.folder = None
                     res.status = Status.UNKNOWN
 
         elif len(scores) == 1:
-            confidence = 100
-            if (scores[0][1] >= 30):
-                res.folder = scores.items()[0][0]
+            folder_name, score = next(iter(scores.items()))
+            res.score = score
+
+            if score >= 30:
+                res.folder = folder_name
                 res.status = Status.ASSIGNED
+                confidence = 100
             else:
-                res.folder = None
                 res.status = Status.UNKNOWN
 
         res.confidence = confidence
