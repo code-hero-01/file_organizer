@@ -1,800 +1,718 @@
 import tkinter as tk
-from tkinter import ttk
-from tkinter import messagebox, filedialog
 from pathlib import Path
-from file_scanner import file_scanner
-from models import Rule, rules
+from tkinter import filedialog, messagebox, ttk
+
 from classifier import Classifier
 from file_organizer import organize_files
+from file_scanner import file_scanner
+from models import Rule, Status, rules
 
-# main application window.
+
+# Application state
 root = tk.Tk()
-
 root.title("Smart File Organizer")
-root.geometry("800x650")
-root.minsize(500, 500)
-
-root.columnconfigure(0, weight= 1)
-root.rowconfigure(0, weight=0)
-root.rowconfigure(1, weight=1)
-
-# primary menu bar container
-menubar = tk.Menu(root)
+root.geometry("1000x720")
+root.minsize(760, 560)
 
 selected_directory = tk.StringVar()
+files = []
+results = {}                  # FileInfo -> ClassificationResult
+user_choices = {}             # Path -> folder name, or None for "Don't move"
+row_to_file = {}              # Main results Treeview row ID -> FileInfo
+
+
+# Colours and small UI helpers
+COLORS = {
+    "header": "#C5E5F8",
+    "panel": "#D9EAF6",
+    "background": "#EAF2F8",
+    "text": "#243B53",
+    "muted": "#526D82",
+    "entry": "#F8FCFF",
+}
+
+
+def make_button(parent, text, command):
+    return tk.Button(
+        parent,
+        text=text,
+        command=command,
+        font=("Segoe UI", 10, "bold"),
+        bg=COLORS["header"],
+        fg=COLORS["text"],
+        padx=13,
+        pady=5,
+        relief="raised",
+        bd=2,
+    )
+
+
+def file_label(file):
+    return file.path.name
+
+
+def effective_choice(file): # Return the user's override, or the classifier's original suggestion
+    if file.path in user_choices:
+        return user_choices[file.path]
+    return results[file].folder
+
+
+def destination_label(file):
+    return effective_choice(file) or "None"
+
+
+def clear_classification():
+    results.clear()
+    user_choices.clear()
+    row_to_file.clear()
+    results_tree.delete(*results_tree.get_children())
+    review_status.set("Classify the scanned files to see suggestions.")
+
+
+def refresh_results():
+    results_tree.delete(*results_tree.get_children())
+    row_to_file.clear()
+
+    for index, (file, result) in enumerate(results.items()):
+        row_id = f"file_{index}"
+        row_to_file[row_id] = file
+        results_tree.insert(
+            "",
+            "end",
+            iid=row_id,
+            values=(
+                file_label(file),
+                destination_label(file),
+                f"{result.confidence:.1f}%",
+                result.status.name,
+            ),
+        )
+
+    ambiguous_count = sum(
+        result.status == Status.AMBIGUOUS for result in results.values()
+    )
+    review_status.set(
+        f"{len(results)} files classified  |  "
+        f"{ambiguous_count} ambiguous (left at None = not moved)"
+    )
+
+
+def current_folder_options():
+    # Rebuilt whenever a dropdown is opened, so newly added rules appear.
+    return ["None"] + [rule.folder_name for rule in rules]
+
+
+def edit_tree_cell(tree, row_id, column, file, on_change): # Place a read-only Combobox over a Treeview cell
+    bounds = tree.bbox(row_id, column)
+    if not bounds:
+        return
+
+    x, y, width, height = bounds
+    values = list(tree.item(row_id, "values"))
+    column_index = int(column[1:]) - 1
+    current_value = values[column_index] or "None"
+
+    combo = ttk.Combobox(
+        tree,
+        values=current_folder_options(),
+        state="readonly",
+    )
+    combo.set(current_value)
+    combo.place(x=x, y=y, width=width, height=height)
+    combo.focus_set()
+
+    saved = False
+
+    def save_choice(event=None):
+        nonlocal saved
+        if saved:
+            return
+        saved = True
+
+        selected = combo.get()
+        new_choice = None if selected == "None" else selected
+        values[column_index] = selected
+        tree.item(row_id, values=values)
+        combo.destroy()
+        on_change(file, new_choice)
+
+    def close_editor(event=None):
+        if combo.winfo_exists():
+            combo.destroy()
+
+    combo.bind("<<ComboboxSelected>>", save_choice)
+    combo.bind("<Return>", save_choice)
+    combo.bind("<Escape>", close_editor)
+    combo.bind("<FocusOut>", close_editor)
+
+
+# Menu bar
+menubar = tk.Menu(root)
+
+file_menu = tk.Menu(menubar, tearoff=0)
+view_menu = tk.Menu(menubar, tearoff=0)
+help_menu = tk.Menu(menubar, tearoff=0)
+
+
 def browse_directory():
     directory = filedialog.askdirectory(
         title="Select a Folder",
-        mustexist=True
-    )   
-
+        mustexist=True,
+    )
     if directory:
         selected_directory.set(directory)
-        print(f"Selected folder: {directory}")
-    else:
-        print("User cancelled the dialog.")
+        scan_directory()
 
-# file dropdown menu
-# tearoff=0 prevents the user from detaching the menu into a separate window
-file_menu = tk.Menu(menubar, tearoff=0)
-file_menu.add_command(label="Open...", command= browse_directory)
-# file_menu.add_separator()  # visual dividing line
-file_menu.add_command(label="Exit", command=lambda: root.destroy())
 
-view_menu = tk.Menu(menubar, tearoff=0)
-view_menu.add_command(label="Light Mode", command=lambda: print("Light mode"))
-# view_menu.add_separator()  
-view_menu.add_command(label="Dark Mode", command=lambda: print("Dark mode"))
+file_menu.add_command(label="Open...", command=browse_directory)
+file_menu.add_separator()
+file_menu.add_command(label="Exit", command=root.destroy)
 
-# help dropdown menu
-help_menu = tk.Menu(menubar, tearoff=0)
-help_menu.add_command(label="About", command=lambda: messagebox.showinfo("About", "Version 1.0\nGithub: https://github.com/code-hero-01/file_organizer/"))
+# Theme switching is intentionally left as a placeholder for a later polish pass.
+view_menu.add_command(
+    label="Light Mode",
+    command=lambda: messagebox.showinfo("Appearance", "Light mode is already active."),
+)
+view_menu.add_command(
+    label="Dark Mode",
+    command=lambda: messagebox.showinfo("Appearance", "Dark mode is not implemented yet."),
+)
+
+help_menu.add_command(
+    label="About",
+    command=lambda: messagebox.showinfo(
+        "About Smart File Organizer",
+        "Smart File Organizer\nVersion 1.0\n"
+        "Github: https://github.com/code-hero-01/file_organizer/",
+    ),
+)
 
 menubar.add_cascade(label="File", menu=file_menu)
 menubar.add_cascade(label="View", menu=view_menu)
 menubar.add_cascade(label="Help", menu=help_menu)
-
-# configure the window to display the Menu Bar
 root.config(menu=menubar)
 
-# header panel
-header_panel = tk.Frame(root, bg="#C5E5F8", height=75)
-header_panel.grid(row= 0, column= 0, sticky="ew")
-header_panel.grid_propagate(False) # Keeps the frame exactly 100px tall
 
-header_panel.columnconfigure(0, weight=1) 
-header_panel.rowconfigure(0, weight=1) 
+# Main window layout
+root.configure(bg=COLORS["background"])
+root.columnconfigure(0, weight=1)
+root.rowconfigure(1, weight=1)
 
-# application title.
-title_label = tk.Label(
-    header_panel, 
-    text="Smart File Organizer", 
-    font=("Segoe UI", 22), 
-    bg="#C5E5F8", 
-    fg="#243B53"
-)
-title_label.grid(row=0, column=0, sticky="w", padx=25)
+header = tk.Frame(root, bg=COLORS["header"], height=75)
+header.grid(row=0, column=0, sticky="ew")
+header.grid_propagate(False)
+header.columnconfigure(0, weight=1)
 
-# Main content container
-main_frame = tk.Frame(
-    root,
-    bg="#EAF2F8",
-    padx=20,
-    pady=15
-)
+tk.Label(
+    header,
+    text="Smart File Organizer",
+    font=("Segoe UI", 22),
+    bg=COLORS["header"],
+    fg=COLORS["text"],
+).grid(row=0, column=0, sticky="w", padx=25)
 
-main_frame.grid(
-    row=1,
-    column=0,
-    sticky="nsew"
-)
+main = tk.Frame(root, bg=COLORS["background"], padx=18, pady=14)
+main.grid(row=1, column=0, sticky="nsew")
+main.columnconfigure(0, weight=1)
+main.rowconfigure(2, weight=1)
 
-main_frame.columnconfigure(0, weight=1)
-main_frame.rowconfigure(2, weight=1)
 
-# Directory selection panel
+# Source directory panel
 directory_frame = tk.Frame(
-    main_frame,
-    bg="#D9EAF6",
-    padx=15,
-    pady=5,
-    relief="ridge",
-    bd=1
+    main, bg=COLORS["panel"], padx=14, pady=10, relief="ridge", bd=1
 )
-
-directory_frame.grid(
-    row=0,
-    column=0,
-    sticky="ew"
-)
-
+directory_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 directory_frame.columnconfigure(0, weight=1)
 
-# Panel heading
-directory_heading = tk.Label(
+tk.Label(
     directory_frame,
     text="SOURCE DIRECTORY",
     font=("Segoe UI", 10, "bold"),
-    bg="#D9EAF6",
-    fg="#243B53"
-)
+    bg=COLORS["panel"],
+    fg=COLORS["text"],
+).grid(row=0, column=0, sticky="w")
 
-directory_heading.grid(
-    row=0,
-    column=0,
-    sticky="w"
-)
-
-# Display selected directory
 directory_display = tk.Label(
     directory_frame,
     textvariable=selected_directory,
     font=("Segoe UI", 10),
-    bg="#F8FCFF",
-    fg="#526D82",
+    bg=COLORS["entry"],
+    fg=COLORS["muted"],
     anchor="w",
     relief="sunken",
     bd=1,
     padx=8,
-    pady=5
+    pady=6,
+)
+directory_display.grid(row=1, column=0, sticky="ew")
+
+make_button(directory_frame, "Select Directory", browse_directory).grid(
+    row=1, column=1, padx=(8, 0), pady=(7, 0)
 )
 
-directory_display.grid(
-    row=1,
-    column=0,
-    sticky="ew",
-    pady=(8, 0)
-)
 
-scan_button = tk.Button(
-    directory_frame,
-    text="Select Directory",
-    command=browse_directory,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
-)
-
-scan_button.grid(
-    row=1,
-    column=1,
-    sticky="w",
-    padx=5,
-    pady=5
-)
-
-# rules panel
+# Rules panel
 rules_frame = tk.Frame(
-    main_frame,
-    bg="#D9EAF6",
-    padx=15,
-    pady=5,
-    relief="ridge",
-    bd=1
+    main, bg=COLORS["panel"], padx=14, pady=8, relief="ridge", bd=1
 )
-
-rules_frame.grid(
-    row=1,
-    column=0,
-    sticky="ew"
-)
-
+rules_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 rules_frame.columnconfigure(0, weight=1)
 
-
-# Panel heading
-rules_heading = tk.Label(
+tk.Label(
     rules_frame,
     text="RULES",
     font=("Segoe UI", 10, "bold"),
-    bg="#D9EAF6",
-    fg="#243B53"
-)
-
-rules_heading.grid(
-    row=0,
-    column=0,
-    sticky="w"
-)
-
-rule_columns = ("folder", "keywords", "extensions")
+    bg=COLORS["panel"],
+    fg=COLORS["text"],
+).grid(row=0, column=0, sticky="w")
 
 rules_tree = ttk.Treeview(
     rules_frame,
-    columns=rule_columns,
+    columns=("folder", "keywords", "extensions"),
     show="headings",
     selectmode="browse",
-    height=4
+    height=4,
 )
+for column, heading, width in (
+    ("folder", "Folder Name", 150),
+    ("keywords", "Keywords", 420),
+    ("extensions", "Extensions", 220),
+):
+    rules_tree.heading(column, text=heading, anchor="w")
+    rules_tree.column(column, width=width, anchor="w")
 
-rules_tree.heading("folder", text="Folder Name", anchor='w')
-rules_tree.heading("keywords", text="Keywords", anchor='w')
-rules_tree.heading("extensions", text="Extensions", anchor='w')
+rules_tree.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
 
-rules_tree.column("folder", width=150, anchor="w")
-rules_tree.column("keywords", width=400, anchor="w")
-rules_tree.column("extensions", width=200, anchor="w")
-
-rules_tree.grid(
-    row=1,
-    column=0,
-    columnspan=3,
-    sticky="ew",
-    pady=5
-)
 
 def refresh_rules():
     rules_tree.delete(*rules_tree.get_children())
-
-    for rule in rules:
+    for index, rule in enumerate(rules):
         rules_tree.insert(
             "",
             "end",
+            iid=f"rule_{index}",
             values=(
                 rule.folder_name,
                 ", ".join(rule.keywords),
-                ", ".join(rule.extensions)
-            )
+                ", ".join(rule.extensions),
+            ),
         )
 
-refresh_rules()
+
+def invalidate_classification():
+    clear_classification()
+
 
 def add_rule():
     dialog = tk.Toplevel(root)
     dialog.title("Add Classification Rule")
-    dialog.geometry("400x300")
+    dialog.geometry("420x300")
     dialog.resizable(False, False)
-
     dialog.transient(root)
     dialog.grab_set()
+    dialog.configure(bg=COLORS["background"])
 
-    dialog.configure(bg="#EAF2F8")
+    form = tk.Frame(dialog, bg=COLORS["panel"], padx=18, pady=15)
+    form.pack(fill="both", expand=True, padx=14, pady=14)
 
-    # Input variables
     folder_var = tk.StringVar()
     keywords_var = tk.StringVar()
     extensions_var = tk.StringVar()
 
-    form = tk.Frame(dialog, bg="#D9EAF6", padx=20, pady=15)
-    form.pack(fill="both", expand=True, padx=15, pady=15)
-
-    tk.Label(
-        form,
-        text="Folder Name",
-        bg="#D9EAF6"
-    ).pack(anchor="w")
-
-    tk.Entry(
-        form,
-        textvariable=folder_var
-    ).pack(fill="x", pady=(3, 10))
-
-    tk.Label(
-        form,
-        text="Keywords (comma-separated)",
-        bg="#D9EAF6"
-    ).pack(anchor="w")
-
-    tk.Entry(
-        form,
-        textvariable=keywords_var
-    ).pack(fill="x", pady=(3, 10))
-
-    tk.Label(
-        form,
-        text="Extensions (comma-separated)",
-        bg="#D9EAF6"
-    ).pack(anchor="w")
-
-    tk.Entry(
-        form,
-        textvariable=extensions_var
-    ).pack(fill="x", pady=(3, 10))
+    for label_text, variable in (
+        ("Folder Name", folder_var),
+        ("Keywords (comma-separated)", keywords_var),
+        ("Extensions (comma-separated)", extensions_var),
+    ):
+        tk.Label(form, text=label_text, bg=COLORS["panel"]).pack(anchor="w")
+        tk.Entry(form, textvariable=variable).pack(fill="x", pady=(3, 10))
 
     def save_rule():
         folder = folder_var.get().strip()
-
         keywords = [
-            keyword.strip().lower()
-            for keyword in keywords_var.get().split(',')
-            if keyword.strip()
+            item.strip().lower()
+            for item in keywords_var.get().split(",")
+            if item.strip()
         ]
-
         extensions = [
-            extension.strip().lower().lstrip('.')
-            for extension in extensions_var.get().split(',')
-            if extension.strip()
+            item.strip().lower().lstrip(".")
+            for item in extensions_var.get().split(",")
+            if item.strip()
         ]
 
         if not folder:
             messagebox.showwarning(
-                "Invalid Rule",
-                "Please enter a folder name.",
-                parent=dialog
+                "Invalid Rule", "Please enter a folder name.", parent=dialog
             )
             return
-
         if not keywords and not extensions:
             messagebox.showwarning(
-                "Invalid Rule",
+                "Invalid Rule",           
                 "Enter at least one keyword or extension.",
-                parent=dialog
+                parent=dialog,
             )
             return
-
-        if any(rule.folder_name.lower() == folder.lower() for rule in rules):
+        if folder in {".", ".."} or any(char in folder for char in '/\\:'):
+            messagebox.showwarning(
+                "Invalid Folder Name",
+                "Folder names cannot contain path separators or reserved names.",
+                parent=dialog,
+            )
+            return
+        if any(rule.folder_name.casefold() == folder.casefold() for rule in rules):
             messagebox.showwarning(
                 "Duplicate Rule",
                 "A rule with this folder name already exists.",
-                parent=dialog
+                parent=dialog,
             )
             return
 
         rules.append(Rule(folder, keywords, extensions))
-
         refresh_rules()
-        clear_results()
-
+        invalidate_classification()
         dialog.destroy()
 
-    button_frame = tk.Frame(form, bg="#D9EAF6")
-    button_frame.pack(fill="x", pady=(10, 0))
+    buttons = tk.Frame(form, bg=COLORS["panel"])
+    buttons.pack(fill="x", pady=(5, 0))
+    tk.Button(buttons, text="Save Rule", command=save_rule).pack(side="left", padx=4)
+    tk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left", padx=4)
 
-    tk.Button(
-        button_frame,
-        text="Save Rule",
-        command=save_rule
-    ).pack(side="left", padx=5)
-
-    tk.Button(
-        button_frame,
-        text="Cancel",
-        command=dialog.destroy
-    ).pack(side="left", padx=5)
-
-add_rule_button = tk.Button(
-    rules_frame,
-    text="Add Rule",
-    command=add_rule,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
-)
-
-add_rule_button.grid(
-    row=0,
-    column=1,
-    sticky="e",
-    padx=5,
-    pady=5
-)
 
 def delete_rule():
     selection = rules_tree.selection()
-
     if not selection:
-        messagebox.showwarning(
-            "No Selection",
-            "Please select a rule to delete."
-        )
+        messagebox.showwarning("No Selection", "Select a rule to delete.")
         return
-    
-    index = rules_tree.index(selection[0])
+
+    index = int(selection[0].split("_")[1])
     del rules[index]
-
     refresh_rules()
-    clear_results()
+    invalidate_classification()
 
 
-delete_rule_button = tk.Button(
-    rules_frame,
-    text="Delete Rule",
-    command=delete_rule,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
+make_button(rules_frame, "Add Rule", add_rule).grid(
+    row=0, column=1, sticky="e", padx=4, pady=4
 )
-
-delete_rule_button.grid(
-    row=0,
-    column=2,
-    sticky="e",
-    padx=5,
-    pady=5
+make_button(rules_frame, "Delete Rule", delete_rule).grid(
+    row=0, column=2, sticky="e", padx=4, pady=4
 )
+refresh_rules()
 
-# results panel
+
+# Results panel and scanning/classification
 results_frame = tk.Frame(
-    main_frame,
-    bg="#D9EAF6",
-    padx=15,
-    pady=5,
-    relief="ridge",
-    bd=1
+    main, bg=COLORS["panel"], padx=14, pady=8, relief="ridge", bd=1
 )
-
-results_frame.grid(
-    row=2,
-    column=0,
-    sticky="nsew"
-)
-
+results_frame.grid(row=2, column=0, sticky="nsew")
 results_frame.columnconfigure(0, weight=1)
 results_frame.rowconfigure(1, weight=1)
 
-results_heading = tk.Label(
+tk.Label(
     results_frame,
     text="RESULTS",
     font=("Segoe UI", 10, "bold"),
-    bg="#D9EAF6",
-    fg="#243B53"
-)
+    bg=COLORS["panel"],
+    fg=COLORS["text"],
+).grid(row=0, column=0, sticky="w")
 
-results_heading.grid(
-    row=0,
-    column=0,
-    sticky="w"
-)
+review_status = tk.StringVar(value="Select a directory and scan its files.")
+tk.Label(
+    results_frame,
+    textvariable=review_status,
+    font=("Segoe UI", 9),
+    bg=COLORS["panel"],
+    fg=COLORS["muted"],
+).grid(row=0, column=1, sticky="e", padx=8)
 
-result_columns = ("file", "suggested folder", "confidence", "status")
-
+result_columns = ("file", "destination", "confidence", "status")
 results_tree = ttk.Treeview(
     results_frame,
     columns=result_columns,
     show="headings",
     selectmode="browse",
-    height=6
+    height=9,
 )
+for column, heading, width in (
+    ("file", "File Name", 310),
+    ("destination", "Destination Folder", 180),
+    ("confidence", "Confidence", 110),
+    ("status", "Status", 120),
+):
+    results_tree.heading(column, text=heading, anchor="w")
+    results_tree.column(column, width=width, anchor="w")
 
-results_tree.heading("file", text="File Name", anchor='w')
-results_tree.heading("suggested folder", text="Suggested Folder", anchor='w')
-results_tree.heading("confidence", text="Confidence", anchor='w')
-results_tree.heading("status", text="Status", anchor='w')
+results_tree.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=6)
 
-results_tree.column("file", width=200, anchor="w")
-results_tree.column("suggested folder", width=150, anchor="w")
-results_tree.column("confidence", width=100, anchor="w")
-results_tree.column("status", width=100, anchor="w")
+scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=results_tree.yview)
+scrollbar.grid(row=1, column=3, sticky="ns")
+results_tree.configure(yscrollcommand=scrollbar.set)
 
-results_tree.grid(
-    row=1,
-    column=0,
-    columnspan=3,
-    sticky="nsew",
-    pady=5
-)
 
-def clear_results():
-    results_tree.delete(*results_tree.get_children())
-
-files = []
 def scan_directory():
     global files
-    directory = selected_directory.get()
+    directory = selected_directory.get().strip()
 
     if not directory:
-        messagebox.showwarning(
-            "No Directory Selected",
-            "Please select a directory first."
-        )
+        messagebox.showwarning("No Directory Selected", "Select a directory first.")
         return
 
-    if not Path(directory).is_dir():
-        messagebox.showerror(
-            "Invalid Directory",
-            "The selected directory does not exist."
-        )
+    try:
+        files = file_scanner(directory)
+    except (NotADirectoryError, PermissionError, OSError) as error:
+        messagebox.showerror("Scan Failed", str(error))
         return
 
-    files = file_scanner(directory)
+    clear_classification()
+    results_tree.delete(*results_tree.get_children())
 
-    if files is None:
-        messagebox.showerror(
-            "Scan Failed",
-            "Unable to scan the selected directory."
-        )
-        return
-
-    messagebox.showinfo(
-        "Scan Complete",
-        f"Found {len(files)} files."
-    )
-
-    clear_results()
-    
-    for file in files:
+    for index, file in enumerate(files):
         results_tree.insert(
-            "",
-            "end",
-            values=(
-                file.filename + '.' + file.extension,
-                '',
-                '',
-                ''
-            )
+            "", "end", iid=f"file_{index}",
+            values=(file.path.name, "", "", "Not classified"),
         )
 
-scan_button = tk.Button(
-    results_frame,
-    text="Scan Directory",
-    command=scan_directory,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
-)
+    review_status.set(f"Found {len(files)} files.")
 
-scan_button.grid(
-    row=0,
-    column=1,
-    sticky="w",
-    padx=5,
-    pady=5
-)
 
-results = {}
-plan = {}
-ambiguous_files = []
-def classify():
+def classify_files():
     if not files:
-        messagebox.showwarning(
-            "No files available",
-            "Please scan files first."
-        )
+        messagebox.showwarning("No Files", "Scan a directory before classifying.")
+        return
+    if not rules:
+        messagebox.showwarning("No Rules", "Add at least one classification rule.")
         return
 
     classifier = Classifier(rules)
-    
+    results.clear()
+    user_choices.clear()
+
     for file in files:
-        res = classifier.classify(file)
-        results[file] = res
+        results[file] = classifier.classify(file)
 
-    if not results:
-        messagebox.showwarning(
-            "Nothing happened!",
-            "Nothing happened!"
-        )
+    refresh_results()
+
+
+def on_main_tree_click(event):
+    row_id = results_tree.identify_row(event.y)
+    column = results_tree.identify_column(event.x)
+    if not row_id or column != "#2":
         return
-    
-    results_tree.delete(*results_tree.get_children())
-        
-    for file, res in results.items():
-        results_tree.insert(
-            "",
-            "end",
-            values=(
-                file.path.name,
-                res.folder,
-                f"{res.confidence:.1f}%",
-                res.status.name
-            )
-        )
 
-        source_file = file.path
-        if res.folder:
-            dest_dir = Path(selected_directory.get()) / res.folder
-        else:   
-            dest_dir = Path(selected_directory.get()) 
+    file = row_to_file.get(row_id)
+    if file is None:
+        return
 
-        plan[source_file] = dest_dir
+    edit_tree_cell(
+        results_tree,
+        row_id,
+        column,
+        file,
+        lambda selected_file, choice: (
+            user_choices.__setitem__(selected_file.path, choice),
+            refresh_results(),
+        ),
+    )
 
-    global ambiguous_files
-    ambiguous_files = [
-        file for file, res in results.items()
-        if res.status.name == "AMBIGUOUS"
+
+results_tree.bind("<Button-1>", on_main_tree_click)
+
+make_button(results_frame, "Scan Directory", scan_directory).grid(
+    row=0, column=2, sticky="e", padx=4, pady=4
+)
+make_button(results_frame, "Classify", classify_files).grid(
+    row=0, column=3, sticky="e", padx=4, pady=4
+)
+
+
+# Ambiguous-file review window
+def open_review_window():
+    ambiguous = [
+        file for file, result in results.items()
+        if result.status == Status.AMBIGUOUS
     ]
 
-classify_button = tk.Button(
-    results_frame,
-    text="Classify",
-    command=classify,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
-)
-
-classify_button.grid(
-    row=0,
-    column=2,
-    sticky="w",
-    padx=5,
-    pady=5
-)
-
-def on_tree_click(event):
-    tree = event.widget
-    # Identify region and row/column clicked
-    region = tree.identify_region(event.x, event.y)
-    if region != "cell":
+    if not results:
+        messagebox.showinfo("Nothing to Review", "Classify the scanned files first.")
         return
-    
-    column = tree.identify_column(event.x) # e.g., "#2"
-    row_id = tree.identify_row(event.y)     # e.g., "I001"
-    
-    # Check if user clicked on the "suggested folder" column (#2)
-    if column == "#2":
-        edit_cell(tree, row_id, column)
-
-AVAILABLE_FOLDERS = [rule.folder_name for rule in rules]
-AVAILABLE_FOLDERS.append(None)
-def edit_cell(tree, row_id, column):
-    # Get the bounding box of the cell
-    x, y, width, height = tree.bbox(row_id, column)
-    
-    # Get current value of the cell
-    current_values = tree.item(row_id, "values")
-    col_index = int(column.replace("#", "")) - 1
-    current_val = current_values[col_index]
-
-    # Create a Combobox widget over the cell
-    combo = ttk.Combobox(tree, values=AVAILABLE_FOLDERS, state="readonly")
-    combo.set(current_val)
-    combo.place(x=x, y=y, width=width, height=height)
-    combo.focus()
-
-    # Save changes when an option is selected or focus is lost
-    def save_value(event=None):
-        new_val = combo.get()
-        # Update treeview values tuple
-        val_list = list(tree.item(row_id, "values"))
-        val_list[col_index] = new_val
-        tree.item(row_id, values=val_list)
-
-        source_file = Path(selected_directory.get()) / val_list[0]
-
-        if new_val:
-            dest_dir = Path(selected_directory.get()) / new_val
-        else:   
-            dest_dir = Path(selected_directory.get())
-
-        plan[source_file] = dest_dir
-        
-        # Destroy the combobox
-        combo.destroy()
-        
-    combo.bind("<<ComboboxSelected>>", save_value)
-    combo.bind("<FocusOut>", lambda e: combo.destroy())
-    combo.bind("<Return>", save_value)
-
-results_tree.bind("<Button-1>", on_tree_click)
-
-reviewed = False
-def review():
-    if not ambiguous_files:
-        messagebox.showinfo(
-            "No Ambiguous Files",
-            "There are no ambiguous files to review."
-        )
+    if not ambiguous:
+        messagebox.showinfo("No Ambiguous Files", "There are no ambiguous files.")
         return
 
     dialog = tk.Toplevel(root)
     dialog.title("Review Ambiguous Files")
-    dialog.geometry("650x400")
+    dialog.geometry("760x420")
+    dialog.minsize(600, 300)
     dialog.transient(root)
+    dialog.configure(bg=COLORS["background"])
+    dialog.columnconfigure(0, weight=1)
+    dialog.rowconfigure(2, weight=1)
 
     tk.Label(
         dialog,
-        text="Ambiguous Files",
-        font=("Segoe UI", 12, "bold")
-    ).pack(anchor="w", padx=15, pady=10)
+        text="AMBIGUOUS FILES",
+        font=("Segoe UI", 12, "bold"),
+        bg=COLORS["background"],
+        fg=COLORS["text"],
+    ).grid(row=0, column=0, sticky="w", padx=15, pady=(12, 2))
 
-    ambiguous_tree = ttk.Treeview(
+    tk.Label(
         dialog,
-        columns=("filename", "alternatives", "review"),
+        text="Choose a destination from the dropdown, or leave it as None to keep the file in place.",
+        font=("Segoe UI", 9),
+        bg=COLORS["background"],
+        fg=COLORS["muted"],
+    ).grid(row=1, column=0, sticky="w", padx=15, pady=(0, 4))
+
+    review_tree = ttk.Treeview(
+        dialog,
+        columns=("file", "alternatives", "destination"),
         show="headings",
-        selectmode="browse"
+        selectmode="browse",
     )
+    review_tree.heading("file", text="File Name", anchor="w")
+    review_tree.heading("alternatives", text="Suggested Alternatives", anchor="w")
+    review_tree.heading("destination", text="Destination", anchor="w")
+    review_tree.column("file", width=250, anchor="w")
+    review_tree.column("alternatives", width=250, anchor="w")
+    review_tree.column("destination", width=150, anchor="w")
+    review_tree.grid(row=2, column=0, sticky="nsew", padx=14, pady=8)
 
-    ambiguous_tree.heading("filename", text="File Name")
-    ambiguous_tree.heading("alternatives", text="Suggested Alternatives")
-
-    ambiguous_tree.column("filename", width=200)
-    ambiguous_tree.column("alternatives", width=250)
-
-    ambiguous_tree.pack(
-        fill="both",
-        expand=True,
-        padx=15,
-        pady=10
+    review_scroll = ttk.Scrollbar(
+        dialog, orient="vertical", command=review_tree.yview
     )
+    review_scroll.grid(row=2, column=1, sticky="ns", pady=8)
+    review_tree.configure(yscrollcommand=review_scroll.set)
 
-    def refresh_ambiguous():
-        ambiguous_tree.delete(*ambiguous_tree.get_children())
+    review_row_to_file = {}
 
-        for file in ambiguous_files:
-            ambiguous_tree.insert(
+    def refresh_review_tree():
+        review_tree.delete(*review_tree.get_children())
+        review_row_to_file.clear()
+
+        for index, file in enumerate(ambiguous):
+            row_id = f"amb_{index}"
+            review_row_to_file[row_id] = file
+            alternatives = ", ".join(results[file].alternatives[:2]) or "None"
+            review_tree.insert(
                 "",
                 "end",
-                values=(
-                    file.filename,
-                    results[file].alternatives[0]
-                )
+                iid=row_id,
+                values=(file.path.name, alternatives, destination_label(file)),
             )
 
-    refresh_ambiguous()
-    ambiguous_tree.bind("<Button-1>", on_tree_click)
+    def on_review_tree_click(event):
+        row_id = review_tree.identify_row(event.y)
+        column = review_tree.identify_column(event.x)
+        if not row_id or column != "#3":
+            return
 
-    def finish_review():
-        dialog.destroy()
-        global reviewed
-        reviewed = True
-    
-    finish_btn = tk.Button(
-            dialog,
-            text="Done",
-            command=finish_review
-        ).pack(side="left", padx=5)
+        file = review_row_to_file.get(row_id)
+        if file is None:
+            return
+
+        def save_review_choice(selected_file, choice):
+            user_choices[selected_file.path] = choice
+            refresh_results()
+            refresh_review_tree()
+
+        edit_tree_cell(
+            review_tree, row_id, column, file, save_review_choice
+        )
+
+    review_tree.bind("<Button-1>", on_review_tree_click)
+
+    tk.Button(
+        dialog,
+        text="Done",
+        command=dialog.destroy,
+        font=("Segoe UI", 10, "bold"),
+        bg=COLORS["header"],
+        fg=COLORS["text"],
+        padx=14,
+        pady=4,
+    ).grid(row=3, column=0, sticky="e", padx=14, pady=10)
+
+    refresh_review_tree()
 
 
-review_btn = tk.Button(
-    main_frame,
-    text="Review",
-    command=review,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
-)
+# Build and execute the final move plan
+def build_plan():
+    plan = {}
+    for file, result in results.items():
+        folder = effective_choice(file)
+        destination = Path(selected_directory.get()) / folder if folder else None
+        plan[file.path] = destination
+    return plan
 
-review_btn.grid(
-    row=3,
-    column=0,
-    sticky="w",
-    padx=5,
-    pady=5
-)
 
 def organize():
-    if not reviewed:
-        messagebox.showinfo(
-                    "Unreviewed Ambiguous Files Remaining",
-                    "Review ambiguous files first!"
-                )
+    if not results:
+        messagebox.showwarning("No Results", "Scan and classify files first.")
         return
-    
-    organize_files(plan)
 
-organize_btn = tk.Button(
-    main_frame,
-    text="Organize",
-    command=organize,
-    font=("Segoe UI", 10, "bold"),
-    bg="#C5E5F8",
-    fg="#243B53",
-    padx=15,
-    pady=5,
-    relief="raised",
-    bd=2
+    plan = build_plan()
+    moving = [(source, destination) for source, destination in plan.items()
+              if destination is not None and source.parent != destination]
+    staying = len(plan) - len(moving)
+
+    if not moving:
+        messagebox.showinfo(
+            "Nothing to Organize",
+            f"No files have a destination folder. {staying} file(s) will remain in place.",
+        )
+        return
+
+    preview_lines = [
+        f"{source.name}  ->  {destination.name}"
+        for source, destination in moving[:12]
+    ]
+    if len(moving) > 12:
+        preview_lines.append(f"... and {len(moving) - 12} more file(s)")
+
+    preview = (
+        f"Files to move: {len(moving)}\n"
+        f"Files to leave in place: {staying}\n\n"
+        + "\n".join(preview_lines)
+        + "\n\nProceed?"
+    )
+
+    if not messagebox.askyesno("Confirm Organization", preview):
+        return
+
+    report = organize_files(plan)
+    moved_count = len(report["moved"])
+    skipped_count = len(report["skipped"])
+    error_count = len(report["errors"])
+
+    summary = (
+        f"Moved: {moved_count}\n"
+        f"Left in place: {skipped_count}\n"
+        f"Errors: {error_count}"
+    )
+
+    if report["errors"]:
+        details = "\n".join(
+            f"{source.name}: {error}"
+            for source, error in report["errors"][:5]
+        )
+        summary += "\n\nSome files could not be moved:\n" + details
+
+    if error_count:
+        messagebox.showwarning("Organization Finished with Errors", summary)
+    else:
+        messagebox.showinfo("Organization Complete", summary)
+
+    # Refresh the directory listing after successful/partial movement.
+    scan_directory()
+
+
+make_button(main, "Review Ambiguous", open_review_window).grid(
+    row=3, column=0, sticky="w", padx=2, pady=(8, 0)
+)
+make_button(main, "Organize Files", organize).grid(
+    row=3, column=0, sticky="e", padx=2, pady=(8, 0)
 )
 
-organize_btn.grid(
-    row=3,
-    column=1,
-    sticky="w",
-    padx=5,
-    pady=5
-)
 
-root.mainloop()
+if __name__ == "__main__":
+    root.mainloop()

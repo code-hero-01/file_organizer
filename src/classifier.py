@@ -1,93 +1,112 @@
-from models import FileInfo, Status, ClassificationResult
 from collections import defaultdict
 import math
 
-class Classifier:
-    def __init__(self, rulesList : list):
-        self.rules = rulesList
+from models import ClassificationResult, FileInfo, Rule, Status
 
+
+class Classifier:
+    """Rule-based classifier using IDF-inspired keyword/extension weights."""
+
+    def __init__(self, rules_list: list[Rule]):
+        self.rules = rules_list
         self.keyword_inverted_idx = defaultdict(list)
         self.extension_inverted_idx = defaultdict(list)
-        for rule in self.rules: 
-            for keyword in rule.keywords:
-                self.keyword_inverted_idx[keyword].append(rule.folder_name)
-            for extension in rule.extensions:
-                self.extension_inverted_idx[extension].append(rule.folder_name)
 
-
-    def score(self, file : FileInfo) -> dict:
-        scores = {}
-        total_folders = len(self.rules)
-
-        keyword_idf_idx = {}
-        extension_idf_idx = {}
-
-        for keyword, folders in self.keyword_inverted_idx.items():
-            keyword_idf_idx[keyword] = math.log((total_folders + 1)/ (len(set(folders)) + 1)) + 1
-        for extension, folders in self.extension_inverted_idx.items():
-            extension_idf_idx[extension] = math.log((total_folders + 1) / (len(set(folders)) + 1)) + 1
-
-        keyword_wt = 1
-        extension_wt = 1
         for rule in self.rules:
-            keyword_score = 0
             for keyword in rule.keywords:
-                if keyword in file.tokens:
-                    keyword_score += keyword_idf_idx[keyword]
+                self.keyword_inverted_idx[keyword.strip().lower()].append(
+                    rule.folder_name
+                )
+            for extension in rule.extensions:
+                normalized = extension.strip().lower().lstrip(".")
+                self.extension_inverted_idx[normalized].append(rule.folder_name)
 
-            extension_score = 0
-            if file.extension in rule.extensions:
-                extension_score = extension_idf_idx[file.extension]
+        total_folders = len(self.rules)
+        self.keyword_idf = {
+            keyword: math.log((total_folders + 1) / (len(set(folders)) + 1)) + 1
+            for keyword, folders in self.keyword_inverted_idx.items()
+        }
+        self.extension_idf = {
+            extension: math.log((total_folders + 1) / (len(set(folders)) + 1)) + 1
+            for extension, folders in self.extension_inverted_idx.items()
+        }
 
-            scores[rule.folder_name] = keyword_wt * keyword_score + extension_wt * extension_score
-       
+    def score(self, file: FileInfo) -> dict[str, float]:
+        scores = {}
+        file_tokens = {token.lower() for token in file.tokens}
+        file_extension = file.extension.lower().lstrip(".")
+
+        for rule in self.rules:
+            keyword_score = sum(
+                self.keyword_idf[keyword.lower()]
+                for keyword in rule.keywords
+                if keyword.lower() in file_tokens
+            )
+
+            extension_score = 0.0
+            if file_extension in {
+                extension.lower().lstrip(".") for extension in rule.extensions
+            }:
+                extension_score = self.extension_idf[file_extension]
+
+            scores[rule.folder_name] = keyword_score + extension_score
+
         return scores
 
-    def classify(self, file : FileInfo) -> ClassificationResult:
-        scores = {}
-        res = ClassificationResult()
-
+    def classify(self, file: FileInfo) -> ClassificationResult:
         scores = self.score(file)
-        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        alternatives = tuple(folder for folder, score in sorted_scores)
+        if not scores:
+            return ClassificationResult()
 
-        confidence = 0
-        if len(scores) > 1:
-            top_two_items = sorted_scores[:2]
-            first_highest = top_two_items[0]
-            second_highest = top_two_items[1]
+        sorted_scores = sorted(
+            scores.items(), key=lambda item: item[1], reverse=True
+        )
+        alternatives = tuple(folder for folder, _ in sorted_scores)
+        best_folder, best_score = sorted_scores[0]
 
-            if first_highest[1] < 1:
-                res.folder = None
-                res.status = Status.UNKNOWN
+        if len(sorted_scores) == 1:
+            confidence = 100.0 if best_score > 0 else 0.0
+            if best_score > 0:
+                return ClassificationResult(
+                    folder=best_folder,
+                    score=best_score,
+                    confidence=confidence,
+                    status=Status.ASSIGNED,
+                    alternatives=alternatives,
+                )
+            return ClassificationResult(
+                score=best_score,
+                confidence=confidence,
+                status=Status.UNKNOWN,
+                alternatives=alternatives,
+            )
 
-            else:
-                confidence = ((first_highest[1] - second_highest[1]) / first_highest[1]) * 100
-                
-                if confidence >= 75:
-                    res.folder = first_highest[0] 
-                    res.score = first_highest[1]
-                    res.status = Status.ASSIGNED
-                    res.alternatives = alternatives
-                   
-                elif confidence < 75 and confidence >= 40:
-                    res.folder = None
-                    res.status = Status.AMBIGUOUS
-                    res.alternatives = alternatives
-                else:
-                    res.folder = None
-                    res.status = Status.UNKNOWN
+        second_score = sorted_scores[1][1]
+        if best_score < 1:
+            return ClassificationResult(
+                score=best_score,
+                confidence=0.0,
+                status=Status.UNKNOWN,
+                alternatives=alternatives,
+            )
 
-        elif len(scores) == 1:
-            folder_name, score = next(iter(scores.items()))
-            res.score = score
+        # This is a relative score margin, not a calibrated probability.
+        confidence = ((best_score - second_score) / best_score) * 100
 
-            if score >= 30:
-                res.folder = folder_name
-                res.status = Status.ASSIGNED
-                confidence = 100
-            else:
-                res.status = Status.UNKNOWN
+        if confidence >= 75:
+            status = Status.ASSIGNED
+            folder = best_folder
+        elif confidence >= 40:
+            status = Status.AMBIGUOUS
+            folder = None
+        else:
+            status = Status.UNKNOWN
+            folder = None
 
-        res.confidence = confidence
-        return res
+        return ClassificationResult(
+            folder=folder,
+            score=best_score,
+            confidence=confidence,
+            status=status,
+            alternatives=alternatives,
+        )

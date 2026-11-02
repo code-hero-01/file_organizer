@@ -1,37 +1,40 @@
 from pathlib import Path
-from models import FileInfo
 import re
 
-def file_scanner(dir_path: str) -> list[FileInfo]:
-    dir_path = Path(dir_path)
+from models import FileInfo
 
-    # check if it is a directory
-    if dir_path.is_dir() is False:
-        print("Enter a valid directory path!")
-        return []
+
+def file_scanner(dir_path: str | Path) -> list[FileInfo]:
+    """Return FileInfo objects for files directly inside dir_path.
+
+    Subdirectories are intentionally not scanned recursively.
+    Raises NotADirectoryError for an invalid directory and OSError
+    if the directory cannot be read.
+    """
+    directory = Path(dir_path)
+
+    if not directory.is_dir():
+        raise NotADirectoryError(f"Not a directory: {directory}")
 
     files = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file():
+            continue
 
-    # iterate over files in the directory path
-    for f in dir_path.iterdir():
-        if f.is_file():
-            path = f
-            filename = f.stem
-            extension = f.suffix[1:]
-            tokens = tuple(
-                token for token in re.split(
-                    r'[^a-zA-Z0-9]+', filename.lower()
-                )
-                if token
-            )
-            
-            file = FileInfo(
-                path = path,
-                filename= filename,
-                extension= extension,
-                tokens= tokens
-            )
+        stem = path.stem
+        extension = path.suffix[1:].lower()
+        tokens = tuple(
+            token for token in re.split(r"[^a-zA-Z0-9]+", stem.lower())
+            if token
+        )
 
-            files.append(file)
+        files.append(
+            FileInfo(
+                path=path,
+                filename=stem,
+                extension=extension,
+                tokens=tokens,
+            )
+        )
 
     return files
